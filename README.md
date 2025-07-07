@@ -44,7 +44,6 @@ curl -X GET http://localhost:8080/health
 
 ### Chat Completions (OpenAI-兼容)
 
-bash
 curl -X POST http://localhost:8080/v1/chat/completions
 
 -H "Content-Type: application/json"
@@ -62,7 +61,6 @@ curl -X POST http://localhost:8080/v1/chat/completions
 
 ### 直接 Gemini 命令
 
-bash
 curl -X POST http://localhost:8080/run-gemini
 
 -H "Content-Type: application/json"
@@ -77,7 +75,6 @@ curl -X POST http://localhost:8080/run-gemini
 
 ### API 使用统计
 
-bash
 curl -X GET http://localhost:8080/stats
 
 ## 配置
@@ -92,6 +89,25 @@ curl -X GET http://localhost:8080/stats
 ## 日志
 
 日志存储在 `./logs` 目录，按天轮换。
+
+
+5. 使用说明
+部署后，你可以通过以下方式使用:
+
+创建环境文件:
+cp .env.example .env
+编辑 .env 文件:
+
+添加你的 Gemini API 密钥
+设置允许的访问令牌
+配置 IP 白名单
+启动服务:
+
+docker compose up -d
+测试服务:
+curl http://localhost:8080/health
+查看日志:
+docker compose logs -f gemini-cli-api
 
 ## 许可证
 
