@@ -7,6 +7,7 @@ import logging
 import tiktoken
 import os
 import random
+import ipaddress
 from logging.handlers import TimedRotatingFileHandler
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -87,6 +88,54 @@ def update_api_key_stats(api_key: str, model: str):
             api_key_stats[api_key]["models"][model] = 0
         api_key_stats[api_key]["models"][model] += 1
 
+def is_ip_allowed(client_ip: str, allowed_ips: List[str]) -> bool:
+    """
+    检查客户端IP是否被允许访问
+    
+    支持的格式：
+    1. "*" 或 "all" - 允许所有IP
+    2. "192.168.1.0/24" - CIDR网段格式
+    3. "192.168.1.100" - 单个IP地址
+    
+    Args:
+        client_ip: 客户端IP地址
+        allowed_ips: 允许的IP列表
+        
+    Returns:
+        bool: 是否允许访问
+    """
+    if not allowed_ips:
+        return False
+        
+    # 转换客户端IP为IPv4或IPv6地址对象
+    try:
+        client_ip_obj = ipaddress.ip_address(client_ip)
+    except ValueError:
+        # 如果IP格式无效，拒绝访问
+        return False
+    
+    for allowed_ip in allowed_ips:
+        # 检查是否允许所有IP
+        if allowed_ip.lower() in ["*", "all"]:
+            return True
+            
+        try:
+            # 尝试解析为网段（CIDR格式）
+            if "/" in allowed_ip:
+                network = ipaddress.ip_network(allowed_ip, strict=False)
+                if client_ip_obj in network:
+                    return True
+            else:
+                # 尝试解析为单个IP地址
+                allowed_ip_obj = ipaddress.ip_address(allowed_ip)
+                if client_ip_obj == allowed_ip_obj:
+                    return True
+        except ValueError:
+            # 忽略无效的IP或网段格式
+            continue
+    
+    return False
+
 # --- Pydantic Models ---
 class ChatMessage(BaseModel):
     role: str
@@ -152,12 +201,24 @@ async def security_middleware(request: Request, call_next):
     if request.url.path in ["/health", "/stats"]:
         return await call_next(request)
     
-    # **IP Whitelisting**
+    # **增强的IP访问控制**
     client_ip = request.client.host
-    if client_ip not in ALLOWED_IPS:
+    if not is_ip_allowed(client_ip, ALLOWED_IPS):
+        # 记录被拒绝的访问尝试
+        api_logger.warning(
+            f"Access denied for IP: {client_ip}", 
+            extra={"details": {"client_ip": client_ip, "allowed_ips": ALLOWED_IPS}}
+        )
         return JSONResponse(
             status_code=403, 
-            content={"detail": f"Access denied: IP {client_ip} is not allowed."}
+            content={
+                "detail": f"Access denied: IP {client_ip} is not allowed.",
+                "allowed_formats": [
+                    "Use '*' or 'all' to allow all IPs",
+                    "Use CIDR format like '192.168.1.0/24' for subnets", 
+                    "Use specific IPs like '192.168.1.100'"
+                ]
+            }
         )
     
     start_time = time.time()
@@ -287,6 +348,53 @@ async def health_check():
         "timestamp": int(time.time()),
         "gemini_cli_available": subprocess.run(["which", "gemini"], capture_output=True).returncode == 0
     }
+
+@app.get("/ip-config", tags=["Management"])
+async def get_ip_config():
+    """
+    **查看当前IP访问控制配置**.
+    """
+    return {
+        "allowed_ips": ALLOWED_IPS,
+        "ip_rules_explanation": {
+            "*_or_all": "允许所有IP访问",
+            "cidr_format": "如 '192.168.1.0/24' 表示允许整个网段",
+            "single_ip": "如 '192.168.1.100' 表示允许单个IP",
+            "examples": [
+                "['*'] - 允许所有IP",
+                "['192.168.1.0/24'] - 只允许192.168.1.x网段",
+                "['127.0.0.1', '192.168.1.100'] - 只允许指定的IP",
+                "['192.168.1.0/24', '10.0.0.1'] - 允许网段和单个IP混合"
+            ]
+        }
+    }
+
+@app.post("/test-ip", tags=["Management"])
+async def test_ip_access(request: Request):
+    """
+    **测试指定IP是否被允许访问**.
+    
+    请求体格式: {"test_ip": "192.168.1.100"}
+    """
+    try:
+        request_body = await request.json()
+        test_ip = request_body.get("test_ip")
+        
+        if not test_ip:
+            raise HTTPException(status_code=400, detail="请提供要测试的IP地址")
+        
+        is_allowed = is_ip_allowed(test_ip, ALLOWED_IPS)
+        
+        return {
+            "test_ip": test_ip,
+            "is_allowed": is_allowed,
+            "current_client_ip": request.client.host,
+            "allowed_ips_config": ALLOWED_IPS,
+            "message": f"IP {test_ip} {'允许' if is_allowed else '拒绝'} 访问"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"测试失败: {str(e)}")
 
 @app.get("/", tags=["Root"])
 def read_root():

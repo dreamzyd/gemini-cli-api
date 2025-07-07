@@ -105,8 +105,75 @@ curl -X GET http://localhost:8080/stats
 |------------------|-----------------------------|
 | `API_KEYS`       | Gemini API 密钥列表（JSON 数组） |
 | `ALLOWED_TOKENS` | 允许访问的 Bearer Token（数组）  |
-| `ALLOWED_IPS`    | 允许的 IP 地址（数组）           |
+| `ALLOWED_IPS`    | 允许的 IP 地址（数组，支持多种格式） |
 | `LOG_LEVEL`      | 日志级别：DEBUG / INFO / WARNING / ERROR |
+
+---
+
+## 🛡️ IP 访问控制（新功能）
+
+### 支持的IP配置格式
+
+`ALLOWED_IPS` 现在支持多种灵活的配置格式：
+
+1. **允许所有IP**：
+   ```bash
+   ALLOWED_IPS=["*"]
+   # 或者
+   ALLOWED_IPS=["all"]
+   ```
+
+2. **网段限制（CIDR格式）**：
+   ```bash
+   ALLOWED_IPS=["192.168.1.0/24"]        # 允许 192.168.1.x 网段
+   ALLOWED_IPS=["10.0.0.0/8"]            # 允许 10.x.x.x 网段  
+   ALLOWED_IPS=["172.16.0.0/12"]         # 允许 172.16.x.x - 172.31.x.x 网段
+   ```
+
+3. **单个IP地址**：
+   ```bash
+   ALLOWED_IPS=["127.0.0.1"]             # 只允许本地访问
+   ALLOWED_IPS=["192.168.1.100"]         # 只允许特定IP
+   ```
+
+4. **混合配置**：
+   ```bash
+   ALLOWED_IPS=["192.168.1.0/24", "10.0.0.1", "172.16.1.100"]
+   ```
+
+### IP管理端点
+
+#### 查看当前IP配置
+
+```bash
+curl -X GET http://localhost:8080/ip-config
+```
+
+#### 测试IP是否被允许
+
+```bash
+curl -X POST http://localhost:8080/test-ip \
+  -H "Content-Type: application/json" \
+  -d '{"test_ip": "192.168.1.100"}'
+```
+
+### 配置示例
+
+```bash
+# .env 文件示例
+
+# 允许所有IP访问（开发环境）
+ALLOWED_IPS=["*"]
+
+# 只允许内网访问（生产环境）
+ALLOWED_IPS=["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
+
+# 只允许特定IP（高安全环境）
+ALLOWED_IPS=["192.168.1.100", "192.168.1.101"]
+
+# 混合配置（推荐）
+ALLOWED_IPS=["127.0.0.1", "192.168.1.0/24", "10.0.0.50"]
+```
 
 ---
 
