@@ -1,0 +1,21 @@
+services:
+  gemini-cli-api:
+    build: .
+    container_name: gemini-cli-api
+    ports:
+      - "8080:8000"  # **映射到宿主机的 8080 端口**
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    environment:
+      - PATH=/app/venv/bin:$PATH  # **确保虚拟环境优先**
+
