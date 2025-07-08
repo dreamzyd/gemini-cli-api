@@ -8,9 +8,10 @@ import tiktoken
 import os
 import random
 import ipaddress
+from datetime import datetime, timezone, timedelta
 from logging.handlers import TimedRotatingFileHandler
-from fastapi import FastAPI, HTTPException, Request, Depends
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request, Depends, Form, Cookie
+from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
@@ -25,13 +26,32 @@ ALLOWED_TOKENS = json.loads(os.getenv("ALLOWED_TOKENS", '[]'))
 ALLOWED_IPS = json.loads(os.getenv("ALLOWED_IPS", '["127.0.0.1"]'))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
+# 北京时间时区
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+def get_beijing_time():
+    """获取当前北京时间"""
+    return datetime.now(BEIJING_TZ)
+
+def get_last_reset_time():
+    """获取最近一次的重置时间点（北京时间下午3点）"""
+    now = get_beijing_time()
+    reset_time_today = now.replace(hour=15, minute=0, second=0, microsecond=0)
+    
+    if now >= reset_time_today:
+        # 如果当前时间已过今天的重置时间，返回今天的重置时间
+        return reset_time_today
+    else:
+        # 如果当前时间未到今天的重置时间，返回昨天的重置时间
+        return reset_time_today - timedelta(days=1)
+
 # API Key 使用统计和健康状态（按模型分别管理）
 api_key_stats = {
     key: {
         "total_requests": 0, 
         "daily_requests": 0,
         "last_used": None,
-        "last_reset_date": time.strftime("%Y-%m-%d"),
+        "last_reset_time": get_last_reset_time().timestamp(),
         "models": {}  # 每个模型单独跟踪：requests, errors, health, daily_requests等
     } for key in API_KEYS
 }
@@ -87,15 +107,17 @@ def get_next_api_key(model: str = "gemini-2.0-flash-exp") -> str:
     if not API_KEYS:
         raise HTTPException(status_code=500, detail="No API keys configured")
     
-    # 重置每日计数器（如果是新的一天）
-    today = time.strftime("%Y-%m-%d")
+    # 检查是否需要重置每日计数器（基于北京时间下午3点）
+    current_reset_time = get_last_reset_time().timestamp()
     for key in api_key_stats:
-        if api_key_stats[key]["last_reset_date"] != today:
+        if api_key_stats[key]["last_reset_time"] < current_reset_time:
             api_key_stats[key]["daily_requests"] = 0
-            api_key_stats[key]["last_reset_date"] = today
+            api_key_stats[key]["last_reset_time"] = current_reset_time
             # 重置所有模型的每日计数
             for model_name in api_key_stats[key]["models"]:
                 api_key_stats[key]["models"][model_name]["daily_requests"] = 0
+            
+            api_logger.info(f"Reset daily counters for key {mask_api_key(key)} at Beijing time {get_beijing_time().strftime('%Y-%m-%d %H:%M:%S')}")
     
     # 确保所有key都有这个模型的统计记录
     for key in API_KEYS:
@@ -544,7 +566,8 @@ async def get_api_stats():
             "total_requests": stats["total_requests"],
             "daily_requests": stats["daily_requests"],
             "last_used": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stats["last_used"])) if stats["last_used"] else "Never",
-            "last_reset_date": stats["last_reset_date"],
+            "last_reset_time": datetime.fromtimestamp(stats["last_reset_time"], BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S") + " (BJT)",
+            "next_reset_time": (get_last_reset_time() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S") + " (BJT)",
             "models": safe_models
         }
     
@@ -571,8 +594,9 @@ async def get_api_stats():
         "load_balancing": {
             "strategy": "Model-specific least used healthy key first",
             "health_check": "3 consecutive errors per model mark key as unhealthy for that model",
-            "daily_reset": "Counters reset at midnight",
-            "model_isolation": "Each model has independent quota and health tracking"
+            "daily_reset": "Counters reset at 15:00 Beijing Time (GMT+8)",
+            "model_isolation": "Each model has independent quota and health tracking",
+            "current_beijing_time": get_beijing_time().strftime("%Y-%m-%d %H:%M:%S") + " (BJT)"
         }
     }
 
@@ -820,12 +844,182 @@ async def get_api_key_recommendations():
     
     return recommendations
 
+@app.get("/login", response_class=HTMLResponse, tags=["Dashboard"])
+async def get_login_page(request: Request):
+    """显示仪表板登录页面"""
+    return HTMLResponse(content="""
+        <!DOCTYPE html>
+        <html lang="zh-CN">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>登录 - Gemini API Dashboard</title>
+            <style>
+                body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #f0f2f5; margin: 0; }
+                .login-card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); text-align: center; width: 320px; }
+                h2 { margin-top: 0; color: #333; }
+                p { color: #666; margin-bottom: 20px; }
+                input { width: 100%; padding: 12px; margin-bottom: 20px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }
+                button { width: 100%; padding: 12px; border: none; border-radius: 6px; background-color: #007bff; color: white; font-size: 16px; cursor: pointer; }
+                button:hover { background-color: #0056b3; }
+                .error { color: #d93025; margin-top: 10px; }
+            </style>
+        </head>
+        <body>
+            <div class="login-card">
+                <h2>Dashboard 登录</h2>
+                <p>请输入您的访问令牌</p>
+                <form action="/auth" method="post">
+                    <input type="password" name="token" placeholder="访问令牌" required>
+                    <button type="submit">登 录</button>
+                </form>
+            </div>
+        </body>
+        </html>
+    """)
+
+@app.post("/auth", tags=["Dashboard"])
+async def handle_login(token: str = Form(...)):
+    """处理登录请求并设置cookie"""
+    if token in ALLOWED_TOKENS:
+        response = RedirectResponse(url="/dashboard", status_code=303)
+        response.set_cookie(key="session_token", value=token, httponly=True, max_age=86400, samesite="strict") # 24 hours
+        return response
+    else:
+        # 在实际应用中，您可能会重定向回登录页面并显示错误
+        raise HTTPException(status_code=401, detail="无效的访问令牌")
+
+@app.get("/dashboard", response_class=HTMLResponse, tags=["Dashboard"])
+async def dashboard(session_token: Optional[str] = Cookie(None)):
+    """API Key使用情况可视化仪表板（需要Cookie认证）"""
+    if session_token not in ALLOWED_TOKENS:
+        return RedirectResponse(url="/login", status_code=307)
+    
+    html_content = """
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini API Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.1/dist/chart.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI',-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif; background-color: #f8f9fa; color: #343a40; margin: 0; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .header { text-align: center; margin-bottom: 20px; }
+        .header h1 { font-size: 2rem; color: #212529; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+        .card { background: white; border-radius: 8px; padding: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .card h3 { margin-top: 0; border-bottom: 1px solid #dee2e6; padding-bottom: 10px; margin-bottom: 15px; font-size: 1.1rem; }
+        .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; text-align: center; }
+        .stat-item .value { font-size: 1.75rem; font-weight: 600; color: #007bff; }
+        .stat-item .label { font-size: 0.9rem; color: #6c757d; }
+        .key-list { max-height: 500px; overflow-y: auto; padding-right: 10px; }
+        .key-item { background: #fdfdff; border: 1px solid #e9ecef; border-left: 4px solid #007bff; border-radius: 6px; padding: 15px; margin-bottom: 10px; }
+        .key-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-weight: 600; }
+        .health-badge { padding: 3px 8px; border-radius: 12px; font-size: 0.8rem; color: white; }
+        .health-healthy { background-color: #28a745; }
+        .health-unhealthy { background-color: #dc3545; }
+        .model-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; margin-top: 10px; font-size: 0.85rem; }
+        .model-item { background: #f8f9fa; padding: 8px; border-radius: 4px; }
+        .model-name { font-weight: 600; }
+        .refresh-btn { position: fixed; bottom: 20px; right: 20px; background: #007bff; color: white; border: none; width: 50px; height: 50px; border-radius: 50%; cursor: pointer; font-size: 1.5rem; box-shadow: 0 4px 10px rgba(0,0,0,0.1); transition: transform 0.2s; display: flex; align-items: center; justify-content: center; }
+        .refresh-btn:hover { background-color: #0056b3; transform: scale(1.1); }
+        .chart-container { height: 300px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header"><h1>Gemini API Dashboard</h1></div>
+        <div class="grid">
+            <div class="card">
+                <h3>概览</h3>
+                <div class="stat-grid" id="globalStats"></div>
+            </div>
+            <div class="card">
+                <h3>今日模型使用分布</h3>
+                <div class="chart-container"><canvas id="modelChart"></canvas></div>
+            </div>
+            <div class="card">
+                <h3>API Key 详细信息</h3>
+                <div class="key-list" id="keyList"></div>
+            </div>
+             <div class="card">
+                <h3>重置时间信息</h3>
+                 <div class="stat-grid" id="timeInfo"></div>
+            </div>
+        </div>
+    </div>
+    <button class="refresh-btn" onclick="loadData()">🔄</button>
+    <script>
+        let modelChart;
+        async function loadData() {
+            try {
+                const response = await fetch('/stats');
+                if (!response.ok) { window.location.href = '/login'; return; }
+                const data = await response.json();
+                updateGlobalStats(data);
+                updateCharts(data);
+                updateKeyList(data.api_key_stats);
+            } catch (error) { console.error('加载数据失败:', error); }
+        }
+        function updateGlobalStats(data) {
+            const summary = data.global_summary;
+            document.getElementById('globalStats').innerHTML = `
+                <div class="stat-item"><div class="value">${summary.total_api_keys}</div><div class="label">总 Keys</div></div>
+                <div class="stat-item"><div class="value">${summary.models_in_use}</div><div class="label">使用中模型</div></div>
+                <div class="stat-item"><div class="value">${summary.total_requests_today}</div><div class="label">今日请求</div></div>
+                <div class="stat-item"><div class="value">${summary.total_requests_all_time}</div><div class="label">累计请求</div></div>`;
+
+            const keys = Object.keys(data.api_key_stats);
+            const timeInfo = keys.length > 0 ? `
+                <div class="stat-item"><div class="value" style="font-size: 1rem;">${data.load_balancing.current_beijing_time}</div><div class="label">当前北京时间</div></div>
+                <div class="stat-item"><div class="value" style="font-size: 1rem;">${data.api_key_stats[keys[0]].next_reset_time}</div><div class="label">下次重置时间</div></div>` : '';
+            document.getElementById('timeInfo').innerHTML = timeInfo;
+        }
+        function updateCharts(data) {
+            const modelLabels = Object.keys(data.model_summary);
+            const modelData = modelLabels.map(model => data.model_summary[model].total_daily_requests);
+            if (modelChart) modelChart.destroy();
+            modelChart = new Chart(document.getElementById('modelChart').getContext('2d'), {
+                type: 'doughnut',
+                data: { labels: modelLabels, datasets: [{ data: modelData, backgroundColor: ['#007bff', '#28a745', '#ffc107', '#17a2b8', '#6f42c1', '#fd7e14'] }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right' } } }
+            });
+        }
+        function updateKeyList(keyStats) {
+            const container = document.getElementById('keyList');
+            container.innerHTML = Object.entries(keyStats).map(([keyName, stats]) => {
+                const overallHealthy = Object.values(stats.models).some(model => model.is_healthy);
+                return `
+                <div class="key-item">
+                    <div class="key-header"><span>${keyName}</span><span class="health-badge ${overallHealthy ? 'health-healthy' : 'health-unhealthy'}">${overallHealthy ? '可用' : '部分不可用'}</span></div>
+                    <div style="font-size: 0.8rem; color: #6c757d; margin-bottom: 10px;">今日请求: ${stats.daily_requests} | 累计: ${stats.total_requests} | 最后使用: ${stats.last_used}</div>
+                    <div class="model-stats">
+                        ${Object.entries(stats.models).map(([modelName, modelStats]) => `
+                            <div class="model-item">
+                                <div class="model-name">${modelName} ${modelStats.is_healthy ? '✅' : '❌'}</div>
+                                <div>今日: ${modelStats.daily_requests} | 累计: ${modelStats.requests}</div>
+                            </div>`).join('')}
+                    </div>
+                </div>`;
+            }).join('');
+        }
+        loadData();
+        setInterval(loadData, 30000);
+    </script>
+</body>
+</html>
+    """
+    return HTMLResponse(content=html_content)
+
 @app.get("/", tags=["Root"])
 def read_root():
     return {
         "message": "**Gemini CLI API is running**",
         "docs": "/docs",
         "health": "/health",
-        "stats": "/stats"
+        "stats": "/stats",
+        "dashboard": "/login"
     }
 
