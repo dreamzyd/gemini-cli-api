@@ -8,12 +8,14 @@
 
 - ✅ **OpenAI 兼容接口**（`/v1/chat/completions`）
 - 🔧 **直接 Gemini 命令执行**（`/run-gemini/`）
-- 🔁 **API Key 自动轮询**，实现负载均衡
+- 🔁 **按模型分别管理的智能负载均衡**，每个模型独立配额跟踪
 - 🔐 **令牌认证机制**
-- 🛡️ **IP 白名单控制**，增强安全性
-- 📄 **详细的请求日志**
-- ❤️ **容器健康检查**
-- 📊 **API 使用统计**
+- 🛡️ **增强的IP访问控制**，支持CIDR网段、单IP、通配符
+- 📄 **安全的详细日志记录**，API Key自动掩码保护
+- ❤️ **API Key健康状态监控**，自动检测和处理故障key
+- 📊 **按模型分别的详细统计和分析**
+- 🚦 **配额耗尽智能检测**，避免浪费请求检查配额
+- ⚡ **每日请求计数重置**，确保负载均衡
 
 ---
 
@@ -89,10 +91,42 @@ curl -X POST http://localhost:8080/run-gemini \
 
 ---
 
-### 📊 API 使用统计
+### 📊 API 使用统计和健康状态
 
 ```bash
 curl -X GET http://localhost:8080/stats
+```
+
+### 🔧 API Key 管理
+
+#### 重置API Key健康状态（支持按模型分别重置）
+
+```bash
+# 重置所有API Key的所有模型
+curl -X POST http://localhost:8080/reset-api-key-health \
+  -H "Content-Type: application/json" \
+  -d '{"reset_all": true}'
+
+# 重置特定API Key的所有模型
+curl -X POST http://localhost:8080/reset-api-key-health \
+  -H "Content-Type: application/json" \
+  -d '{"api_key_pattern": "AIza****abcd"}'
+
+# 重置特定API Key的特定模型
+curl -X POST http://localhost:8080/reset-api-key-health \
+  -H "Content-Type: application/json" \
+  -d '{"api_key_pattern": "AIza****abcd", "model": "gemini-2.0-flash-exp"}'
+
+# 重置所有API Key的特定模型
+curl -X POST http://localhost:8080/reset-api-key-health \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gemini-1.5-pro"}'
+```
+
+#### 获取配额管理建议
+
+```bash
+curl -X GET http://localhost:8080/api-key-recommendations
 ```
 
 ---
@@ -177,9 +211,92 @@ ALLOWED_IPS=["127.0.0.1", "192.168.1.0/24", "10.0.0.50"]
 
 ---
 
+## 🔧 智能API Key管理（新功能）
+
+### 负载均衡策略（按模型分别管理）
+
+系统现在采用**按模型分别管理**的智能负载均衡策略：
+
+1. **模型独立配额管理**：每个API key在不同模型上有独立的配额和健康状态
+2. **按模型选择最优key**：为每个模型请求选择使用次数最少的健康key
+3. **独立健康状态监控**：在某个模型上连续3次错误后，仅在该模型上标记为不健康
+4. **模型间互不影响**：一个模型配额耗尽不会影响其他模型的使用
+5. **每日计数重置**：每个模型的使用计数独立重置
+6. **智能故障切换**：当key在某个模型上不健康时，自动切换到该模型的备用key
+
+### 🔥 关键优势
+- ✅ **精确配额控制**：`gemini-2.0-flash-exp` 配额耗尽不影响 `gemini-1.5-pro` 的使用
+- ✅ **独立健康监控**：每个模型单独跟踪错误和健康状态  
+- ✅ **最大化可用性**：充分利用每个key在不同模型上的配额
+
+### 📋 实际使用场景
+
+假设你有一个API key `AIza****abcd`：
+
+```json
+{
+  "AIza****abcd": {
+    "models": {
+      "gemini-2.0-flash-exp": {
+        "daily_requests": 95,  // 接近配额上限
+        "is_healthy": false,   // 因配额问题标记为不健康
+        "consecutive_errors": 3
+      },
+      "gemini-1.5-pro": {
+        "daily_requests": 23,  // 还有充足配额
+        "is_healthy": true,    // 在此模型上仍然健康
+        "consecutive_errors": 0
+      }
+    }
+  }
+}
+```
+
+**系统行为**：
+- 对 `gemini-2.0-flash-exp` 的请求会自动切换到其他健康的key
+- 对 `gemini-1.5-pro` 的请求仍可正常使用这个key
+- 每个模型的配额独立管理，互不影响
+
+### 配额管理最佳实践
+
+针对"检查配额也消耗配额"的困惑，系统提供以下解决方案：
+
+#### ❌ 不推荐的做法
+```bash
+# 不要这样做 - 频繁检查配额会浪费配额
+while true; do
+  check_quota_api_call  # 这本身就消耗配额！
+done
+```
+
+#### ✅ 推荐的智能方案
+1. **通过错误监控判断配额状态**：
+   - 监控HTTP 429状态码
+   - 检查错误信息中的关键字：`quota`, `limit`, `exceeded`
+   - 分析连续失败模式
+
+2. **被动配额管理**：
+   - 系统自动记录每个key的使用次数
+   - 当key出现配额错误时自动切换到备用key
+   - 通过日志分析识别使用模式
+
+3. **预防性策略**：
+   - 准备多个API key作为备用
+   - 设置每日使用量上限提醒
+   - 定期检查系统健康状态
+
+### 安全的日志记录
+
+- ✅ **API Key安全掩码**：只显示前4位和后4位（如：`AIza****abcd`）
+- ✅ **访问令牌保护**：只显示前8位加省略号
+- ✅ **详细的执行统计**：包含执行时间、成功率等
+- ✅ **错误分类标记**：自动识别配额、无效key等错误类型
+
+---
+
 ## 📁 日志
 
-日志将存储在 `./logs` 目录下，并按天轮换，保留最近 30 天的记录。
+日志将存储在 `./logs` 目录下，并按天轮换，保留最近 30 天的记录。所有敏感信息（API Key、访问令牌）都会被自动掩码保护。
 
 ---
 
